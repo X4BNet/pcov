@@ -33,9 +33,11 @@
 # include "Zend/Optimizer/zend_cfg.h"
 # define PHP_PCOV_CFG 0
 #endif
+#include "Zend/Optimizer/zend_optimizer.h"
 #include "zend_bitset.h"
 #include "zend_exceptions.h"
 #include "zend_observer.h"
+#include "zend_system_id.h"
 #include "zend_vm.h"
 #include "zend_vm_opcodes.h"
 
@@ -323,6 +325,26 @@ static void php_pcov_observer_opcode(zend_execute_data *execute_data, const zend
 	}
 } /* }}} */
 
+/* Keep constant-return calls observable without disabling OPcache or JIT. */
+static zend_result php_pcov_preserve_constant_return_calls(void) {
+	zend_ini_entry *entry = zend_hash_str_find_ptr(
+		EG(ini_directives), ZEND_STRL("opcache.optimization_level"));
+
+	if (entry && entry->value) {
+		zend_long level = zend_ini_parse_quantity_warn(entry->value, entry->name);
+
+		if (level & ZEND_OPTIMIZER_PASS_16) {
+			zend_string *value = zend_long_to_str(level & ~ZEND_OPTIMIZER_PASS_16);
+			zend_result result = zend_alter_ini_entry(
+				entry->name, value, ZEND_INI_SYSTEM, ZEND_INI_STAGE_ACTIVATE);
+			zend_string_release(value);
+			return result;
+		}
+	}
+
+	return SUCCESS;
+}
+
 zend_op_array* php_pcov_compile_file(zend_file_handle *fh, int type) { /* {{{ */
 	zend_op_array *result = zend_compile_file_function(fh, type), *mem;
 
@@ -380,6 +402,11 @@ PHP_MINIT_FUNCTION(pcov)
 	REGISTER_INI_ENTRIES();
 
 	if (php_pcov_api_enabled()) {
+		/* Do not load inlined opcodes cached by a non-coverage process. */
+		if (zend_add_system_entropy("pcov", "coverage-opcodes",
+				ZEND_STRL("preserve-constant-return-calls-v1")) != SUCCESS) {
+			return FAILURE;
+		}
 		zend_observer_opcode_register(php_pcov_observer_opcode);
 	}
 
@@ -464,6 +491,11 @@ PHP_RINIT_FUNCTION(pcov)
 
 	if (!php_pcov_api_enabled()) {
 		return SUCCESS;
+	}
+
+	if (php_pcov_preserve_constant_return_calls() != SUCCESS) {
+		php_error_docref(NULL, E_WARNING, "Cannot disable OPcache constant-return inlining for coverage");
+		return FAILURE;
 	}
 
 	PCG(mem) = zend_arena_create(PCG(ini.memory));

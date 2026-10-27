@@ -17,6 +17,7 @@ if ($expectedJit === 'off') {
 
 \pcov\stop();
 require $target;
+$schema = new PcovJitSchema();
 
 for ($run = 0; $run < 500; $run++) {
     pcov_jit_implicit_return($run);
@@ -27,6 +28,8 @@ for ($run = 0; $run < 500; $run++) {
     iterator_to_array(pcov_jit_generator());
     pcov_jit_recursive(3);
     pcov_jit_side_exit($run);
+    $schema->describe(($run % 2) === 0);
+    $schema->stoppedSchema();
 }
 
 \pcov\clear();
@@ -44,10 +47,32 @@ iterator_to_array(pcov_jit_generator());
 pcov_jit_recursive(3);
 pcov_jit_side_exit(1);
 pcov_jit_side_exit('side-exit');
+$schema->describe(false);
+$schema->describe(true);
 \pcov\stop();
 pcov_jit_stopped_only();
+$schema->stoppedSchema();
 
 $first = \pcov\collect(\pcov\inclusive, [realpath($target)]);
+
+/** Assert actual method hits, since JIT parity can otherwise preserve a shared coverage bug. */
+function assertSchemaCoverage(array $lines, bool $called): void
+{
+    foreach (['banSchema' => $called, 'mutationSchema' => $called, 'unusedSchema' => false, 'stoppedSchema' => false] as $name => $expected) {
+        $method = new ReflectionMethod(PcovJitSchema::class, $name);
+        $covered = false;
+        foreach ($lines as $line => $hit) {
+            if ($line >= $method->getStartLine() && $line <= $method->getEndLine() && $hit > 0) {
+                $covered = true;
+            }
+        }
+        if ($covered !== $expected) {
+            throw new RuntimeException("Unexpected coverage for $name: expected " . (int) $expected);
+        }
+    }
+}
+
+assertSchemaCoverage($first[realpath($target)], true);
 
 \pcov\clear();
 \pcov\start();
@@ -55,6 +80,7 @@ pcov_jit_implicit_return(2);
 \pcov\stop();
 
 $second = \pcov\collect(\pcov\inclusive, [realpath($target)]);
+assertSchemaCoverage($second[realpath($target)], false);
 
 echo json_encode([
     'first' => $first[realpath($target)],

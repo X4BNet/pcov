@@ -109,6 +109,13 @@ When PCOV is enabled by configuration `pcov.enabled=1`:
 
 Extensions or SAPIs which replace the executor may still be incompatible.
 
+PCOV disables OPcache's constant-return function inlining (optimizer pass 16)
+while enabled. Otherwise, OPcache can replace a method call with its literal
+return value and leave the method falsely uncovered. Other configured optimizer
+passes, opcode caching, and JIT remain available. Coverage-enabled processes use
+a separate OPcache file-cache identity so they cannot reuse inlined opcodes
+written by processes with PCOV disabled.
+
 When PCOV is disabled by configuration `pcov.enabled=0`:
 
   * PCOV registers no callback and allocates no request memory

@@ -179,7 +179,12 @@ INI);
         if (!file_exists($socket)) {
             throw new RuntimeException('FPM socket was not created');
         }
-        return fastcgiRequest($socket, __DIR__ . '/jit/fpm-worker.php');
+        $first = fastcgiRequest($socket, __DIR__ . '/jit/fpm-worker.php');
+        $second = fastcgiRequest($socket, __DIR__ . '/jit/fpm-worker.php');
+        if ($second !== $first) {
+            throw new RuntimeException("$mode FPM coverage changed on the next request");
+        }
+        return $first;
     } finally {
         proc_terminate($process);
         fclose($pipes[1]);
