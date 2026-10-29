@@ -61,7 +61,7 @@ function fastcgiRecord(int $type, string $content): string
         . str_repeat("\0", $padding);
 }
 
-function fastcgiRequest(string $socket, string $script): string
+function fastcgiRequest(string $socket, string $script, int $request = 0): string
 {
     $stream = stream_socket_client("unix://$socket", $errorCode, $errorMessage, 5);
     if (!$stream) {
@@ -75,7 +75,7 @@ function fastcgiRequest(string $socket, string $script): string
         'SCRIPT_FILENAME' => $script,
         'SCRIPT_NAME' => '/' . basename($script),
         'DOCUMENT_ROOT' => dirname($script),
-        'QUERY_STRING' => '',
+        'QUERY_STRING' => (string) $request,
         'REMOTE_ADDR' => '127.0.0.1',
         'REMOTE_PORT' => '12345',
         'SERVER_ADDR' => '127.0.0.1',
@@ -94,6 +94,7 @@ function fastcgiRequest(string $socket, string $script): string
 
     $stdout = '';
     $stderr = '';
+    $ended = false;
     while (!feof($stream)) {
         $header = fread($stream, 8);
         if (strlen($header) !== 8) {
@@ -109,6 +110,7 @@ function fastcgiRequest(string $socket, string $script): string
         } elseif ($record['type'] === 7) {
             $stderr .= $content;
         } elseif ($record['type'] === 3) {
+            $ended = true;
             break;
         }
     }
@@ -117,15 +119,19 @@ function fastcgiRequest(string $socket, string $script): string
     if ($stderr !== '') {
         throw new RuntimeException($stderr);
     }
+    if (!$ended) {
+        throw new RuntimeException('FPM closed the connection without END_REQUEST');
+    }
     $parts = preg_split("~\r?\n\r?\n~", $stdout, 2);
     return $parts[1] ?? '';
 }
 
-function runFpm(string $fpm, string $mode, string $root): string
+function runFpm(string $fpm, string $mode, string $root, bool $recycle = false): string
 {
     $socket = "$root/fpm.sock";
     $config = "$root/fpm.conf";
     $errorLog = "$root/error.log";
+    $maxRequests = $recycle ? 1 : 0;
     file_put_contents($config, <<<INI
 [global]
 daemonize = no
@@ -134,6 +140,7 @@ error_log = $errorLog
 listen = $socket
 pm = static
 pm.max_children = 1
+pm.max_requests = $maxRequests
 clear_env = no
 catch_workers_output = yes
 env[PCOV_EXPECTED_JIT] = "$mode"
@@ -145,7 +152,7 @@ INI);
         throw new RuntimeException('cannot locate pcov shared library');
     }
 
-    $command = [$fpm, '-F', '-R', '-y', $config, '-c', '/dev/null'];
+    $command = [$fpm, '-n', '-F', '-R', '-y', $config];
     if ($opcache) {
         array_push($command, '-d', "zend_extension=$opcache");
     }
@@ -155,6 +162,7 @@ INI);
         '-d', 'pcov.enabled=1',
         '-d', 'pcov.directory=' . __DIR__,
         '-d', 'opcache.enable=1',
+        '-d', 'opcache.file_update_protection=0',
         '-d', 'opcache.jit_buffer_size=' . ($mode === 'off' ? '0' : '16M'),
         '-d', "opcache.jit=$mode",
         '-d', 'opcache.jit_hot_func=1',
@@ -179,12 +187,16 @@ INI);
         if (!file_exists($socket)) {
             throw new RuntimeException('FPM socket was not created');
         }
-        $first = fastcgiRequest($socket, __DIR__ . '/jit/fpm-worker.php');
-        $second = fastcgiRequest($socket, __DIR__ . '/jit/fpm-worker.php');
-        if ($second !== $first) {
-            throw new RuntimeException("$mode FPM coverage changed on the next request");
+        $worker = __DIR__ . '/jit/' . ($recycle ? 'fpm-lifetime-worker.php' : 'fpm-worker.php');
+        $first = fastcgiRequest($socket, $worker);
+        for ($request = 1; $request < ($recycle ? 12 : 2); $request++) {
+            if (fastcgiRequest($socket, $worker, $request) !== $first) {
+                throw new RuntimeException("$mode FPM coverage changed on request $request (recycle=$maxRequests)");
+            }
         }
         return $first;
+    } catch (Throwable $exception) {
+        throw new RuntimeException($exception->getMessage() . "\n" . (is_file($errorLog) ? file_get_contents($errorLog) : ''), 0, $exception);
     } finally {
         proc_terminate($process);
         fclose($pipes[1]);
@@ -203,15 +215,17 @@ $root = sys_get_temp_dir() . '/pcov-jit-fpm-' . bin2hex(random_bytes(8));
 mkdir($root);
 
 try {
-    $reference = null;
-    foreach (['off', 'function', 'tracing'] as $mode) {
-        $modeRoot = "$root/$mode";
-        mkdir($modeRoot);
-        $coverage = runFpm($fpm, $mode, $modeRoot);
-        if ($reference !== null && $reference !== $coverage) {
-            throw new RuntimeException("$mode FPM coverage differs");
+    foreach ([false, true] as $recycle) {
+        $reference = null;
+        foreach (['off', 'function', 'tracing'] as $mode) {
+            $modeRoot = "$root/$mode-" . (int) $recycle;
+            mkdir($modeRoot);
+            $coverage = runFpm($fpm, $mode, $modeRoot, $recycle);
+            if ($reference !== null && $reference !== $coverage) {
+                throw new RuntimeException("$mode FPM coverage differs");
+            }
+            $reference = $coverage;
         }
-        $reference = $coverage;
     }
 } finally {
     foreach (new RecursiveIteratorIterator(

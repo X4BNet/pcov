@@ -109,6 +109,13 @@ When PCOV is enabled by configuration `pcov.enabled=1`:
 
 Extensions or SAPIs which replace the executor may still be incompatible.
 
+The patched PHP runtime must preserve opcode-observer metadata in shared JIT
+code. Request-local closure and trait-method copies cannot survive FPM worker
+replacement; build-php's `0009-Fix-JIT-opcode-observer-metadata-lifetime.patch`
+resolves them to OPcache's persistent copy. `tests/jit-fpm.phpt` checks coverage
+across recycled workers with different heap layouts, alongside ordinary FPM
+request reuse, with JIT disabled and with function and tracing JIT enabled.
+
 PCOV disables OPcache's constant-return function inlining (optimizer pass 16)
 while enabled. Otherwise, OPcache can replace a method call with its literal
 return value and leave the method falsely uncovered. Other configured optimizer
